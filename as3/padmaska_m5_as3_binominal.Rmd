@@ -1,0 +1,235 @@
+---
+title: "padmaska_m5_as3"
+author: "Artsiom Padmaska"
+date: "2024-01-23"
+output: html_document
+---
+
+
+```{r, results='hide', echo=FALSE, warning=FALSE, message=FALSE}
+library(AER)
+library(MASS)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(GGally)
+library(readxl)
+theme_set(theme_bw())
+
+mycol <- rgb(1,0,0,0.1,maxColorValue=1)
+
+seismic_data <- read_excel("seismic.xlsx", sheet = "data")
+
+head(seismic_data)
+
+```
+```{r, echo=FALSE, fig.height=15, fig.width=15, warning=F, message=F}
+seismic_data %>% 
+  mutate_at(c("seismic", "seismoacoustic", "shift", "ghazard", "class"), as.factor) %>%
+  ggpairs(mapping = aes(alpha=0.5, fill='red'))
+
+```
+diagonal cells for nbumps >=6 don't have nothing, let's check if they have anything but 0
+```{r}
+unique(seismic_data$nbumps6)
+unique(seismic_data$nbumps7)
+unique(seismic_data$nbumps89)
+```
+There are only 0-s, so we need to delete this features. Also, let's check if the binary + nbumps features balanced?
+```{r, echo=FALSE}
+seismic_data = subset(seismic_data, select = -c(nbumps6,nbumps7,nbumps89) )
+```
+
+```{r}
+ftable(seismic_data$seismic, seismic_data$class)
+ftable(seismic_data$seismoacoustic, seismic_data$class)
+ftable(seismic_data$shift, seismic_data$class)
+ftable(seismic_data$ghazard, seismic_data$class)
+ftable(seismic_data$ghazard, seismic_data$nbumps)
+ftable(seismic_data$ghazard, seismic_data$nbumps2)
+ftable(seismic_data$ghazard, seismic_data$nbumps3)
+ftable(seismic_data$ghazard, seismic_data$nbumps4)
+ftable(seismic_data$ghazard, seismic_data$nbumps5)
+```
+Only 48 result of shift obtained by the seismoacoustic method and 30  based on registration coming form GMax only are high hazard. We won't be able to reliably estimate a coefficient of this feature, so I'll make result c be result b.
+
+```{r}
+seismic_data$seismoacoustic[seismic_data$seismoacoustic == "c"] <- "b"
+seismic_data$ghazard[seismic_data$ghazard == "c"] <- "b"
+```
+
+Standard Poisson model:
+```{r, echo=FALSE}
+m1 <- glm(class~., family=poisson(), data=seismic_data)
+summary(m1)
+```
+```{r, echo=FALSE}
+m0 <- glm.nb(class~., data=seismic_data)
+summary(m0)
+```
+```{r}
+1 - m1$deviance / m1$null.deviance
+```
+```{r}
+1 - m0$deviance / m0$null.deviance
+```
+```{r, echo=FALSE}
+m2 <- glm(class~shift + gpuls + nbumps + nbumps2 + nbumps3 + nbumps4, family=poisson(), data=seismic_data)
+summary(m2)
+```
+Testing the hypothesis of equidispersion against the alternative of overdispersion:
+```{r, echo=FALSE}
+dispersiontest(m1, alternative="greater")
+```
+p-value > 0.05, so we can reject overdispersion 
+
+```{r}
+1 - m2$deviance / m2$null.deviance
+```
+```{r}
+lrtest(m1,m2)
+```
+no significant difference, so m2 is not worse than m1
+
+```{r}
+add1(m2, ~ . + seismic + seismoacoustic + genergy + gdenergy + gdpuls + ghazard + nbumps5 + energy + maxenergy, test="LRT")
+```
+
+
+```{r, echo=FALSE}
+m3 <- glm(class~shift + gpuls + nbumps + nbumps2 + nbumps3 + nbumps4 + nbumps5, family=poisson(), data=seismic_data)
+summary(m3)
+```
+
+```{r}
+1 - m3$deviance / m3$null.deviance
+```
+```{r}
+lrtest(m3,m2)
+```
+model 3 is significantly better than model 2
+
+```{r}
+lrtest(m1,m3)
+```
+model 3 is not worse than model 1
+
+
+```{r}
+add1(m3, ~ . + seismic + seismoacoustic + genergy + gdenergy + gdpuls + ghazard + energy + maxenergy, test="LRT")
+```
+
+None provides a significant improvement.
+```{r, echo=FALSE}
+add1(m3, ~ .^2, test="LRT")
+
+```
+
+```{r, echo=FALSE}
+m4 <- glm(class~shift + gpuls + nbumps + nbumps2 + nbumps3 + nbumps4 + nbumps5 + shift*nbumps + shift*nbumps3 + shift*nbumps4 + gpuls*nbumps + nbumps*nbumps2 + nbumps*nbumps3, family=poisson(), data=seismic_data)
+summary(m4)
+lrtest(m3,m4)
+```
+$R^2_{DEV}$
+```{r}
+1 - m4$deviance / m4$null.deviance
+```
+
+
+```{r, echo=FALSE}
+add1(m4, ~ .^2, test="LRT")
+```
+No more significant improvements.
+
+
+```{r, echo=FALSE}
+summary(m4)
+cov.robust     <- vcovHC(m4, type="HC0")
+se.robust      <- sqrt(diag(cov.robust))
+coeffs         <- coef(m4)
+t.robust       <- coeffs / se.robust
+summary.robust <- cbind(coeffs, se.robust, t.robust, pvalue = 2*(1-pnorm(abs(coeffs/se.robust))))
+print(summary.robust)
+```
+
+
+No significant difference, we can trust our model
+
+```{r}
+yhat <- predict(m4, type="response")
+plot(yhat, cooks.distance(m4), pch=20, xlab="Estimated conditional mean", ylab="Cook's distance")
+lines(c(0,10), c(0.03,0.03), col="red", lwd=2)
+```
+
+
+```{r}
+seismic_data2 <- seismic_data[cooks.distance(m4)<0.03,]
+m5 <- glm(class~shift + gpuls + nbumps + nbumps2 + nbumps3 + nbumps4 + nbumps5 + shift*nbumps + shift*nbumps3 + shift*nbumps4 + gpuls*nbumps + nbumps*nbumps2 + nbumps*nbumps3, family=poisson(), data=seismic_data2)
+summary(m5)
+```
+
+```{r}
+tmp <- cbind(coefficients(m4), coefficients(m5))
+colnames(tmp) <- c("All data", "Filtered by leverage")
+tmp
+```
+
+```{r, echo=FALSE}
+yhat <- predict(m4, type="response")
+plot(jitter(seismic_data$class), yhat, col=mycol, pch=20, ylab="Estimated decision attribute", xlab="decision attribute")
+```
+
+
+
+
+The exponents of the coefficients of the final model and confidence intervals for them:
+```{r, echo=FALSE, message=FALSE}
+exp(coefficients(m4))[-1]
+exp(confint(m4))[-1,]
+```
+
+
+Conclusions:
+
+Shift Type: Coal-getting shifts (W) have a higher risk (`r round(exp(coefficients(m4))["shiftW"],2)` times higher) of high energy seismic bumps compared to preparation shifts. (`r round(exp(confint(m4))["shiftW",], 2)`).
+
+Seismic Activity: 
+
+Each additional pulse recorded by GMax increases the odds of a high energy seismic bump by a factor of `r round(exp(coefficients(m4))["gpuls"],4)`, with a very narrow confidence interval (`r round(exp(confint(m4))["gpuls",], 4)`), suggesting a very slight effect.
+
+Each additional seismic bump recorded increases the odds of a high energy seismic bump by a factor of `r round(exp(coefficients(m4))["nbumps"],2)`. However, the confidence interval is very wide (`r round(exp(confint(m4))["nbumps",], 2)`), indicating considerable uncertainty in this estimate.
+
+Energy Range of Bumps: The impact of seismic bumps varies across different energy ranges, with higher energy bumps (nbumps5) having a much lower odds ratio. But the confidence intervals vary widely, suggesting differing levels of uncertainty.
+
+Interactions: 
+
+The interaction between coal-getting shifts and the number of seismic bumps decreases the odds of a high energy seismic bump by `r (1 - round(exp(coefficients(m4))["shiftW:nbumps"],2)) * 100`% (CI: `r round(exp(confint(m4))["shiftW:nbumps",], 2)`), indicating a mitigating effect of coal-getting shifts on seismic risks.
+
+
+
+For seismic bumps in the energy range $[10^3,10^4)$, the interaction with coal-getting shifts reduces the odds of a high energy seismic bump by `r (1 - round(exp(coefficients(m4))["shiftW:nbumps3"],2)) * 100`% (CI: `r round(exp(confint(m4))["shiftW:nbumps3",], 2)`), suggesting effective risk controls in these shifts for this energy range.
+
+The interaction of coal-getting shifts with seismic bumps in the energy range $[10^4,10^5)$ significantly lowers the odds of a high energy seismic bump by `r (1 - round(exp(coefficients(m4))["shiftW:nbumps4"],2)) * 100`% (CI: `r round(exp(confint(m4))["shiftW:nbumps4",], 2)`), pointing to strong safety measures in these shifts for higher energy bumps.
+
+
+The combined effect of the number of pulses and seismic bumps on the occurrence of a high energy seismic bump is almost negligible (odds ratio: `r round(exp(coefficients(m4))["gpuls:nbumps"],4)`; CI: `r round(exp(confint(m4))["gpuls:nbumps",], 4)`), indicating the number of pulses does not significantly influence seismic risks when combined with the number of bumps.
+
+
+The interaction between the total number of seismic bumps and the number of seismic bumps in the energy range $[10^2,10^3)$ decreases the odds of a high energy seismic bump by `r (1 - round(exp(coefficients(m4))["nbumps:nbumps2"],2)) * 100`% (CI: `r round(exp(confint(m4))["nbumps:nbumps2",], 2)`). This suggests a slight mitigating effect when these specific ranges of seismic bumps occur together.
+
+The interaction between the total number of seismic bumps and the number of seismic bumps in the energy range $[10^3,10^4)$ decreases the odds of a high energy seismic bump by `r (1 - round(exp(coefficients(m4))["nbumps:nbumps3"],2)) * 100`% (CI: `r round(exp(confint(m4))["nbumps:nbumps3",], 2)`). This indicates a small, potentially negligible combined effect for these particular ranges of seismic activity. 
+
+
+
+
+
+
+
+
+
+
+
+
+

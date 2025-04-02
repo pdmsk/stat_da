@@ -1,0 +1,322 @@
+---
+title: "padmaska_m5_as4"
+author: "Artsiom Padmaska"
+date: "2024-01-31"
+output: html_document
+---
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=5.5, fig.width=10}
+library(forecast)
+library(tseries)
+library(lmtest)
+library(Hmisc)
+library(dplyr)
+library(lubridate)
+
+data <- read.csv("daily-min-temperatures.csv", sep=",", stringsAsFactors=F)
+names(data)[1] <- "Date"
+names(data)[2] <- "Value"
+
+data$Value <- as.numeric(data$Value)
+data$Date <- as.Date(data$Date, format="%Y-%m-%d")
+head(data)
+```
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=5.5, fig.width=10}
+
+
+tSeries <- ts(data = data$Value, start = c(format(data$Date[1], "%Y"), format(data$Date[1], "%m"), format(data$Date[1], "%d")), freq = 365)
+
+plot(tSeries, type="l", ylab="Average temp", col="red")
+grid()
+```
+
+
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+plot(stl(tSeries, s.window="periodic"))
+```
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+LambdaOpt <- BoxCox.lambda(tSeries)
+plot(stl(BoxCox(tSeries, LambdaOpt), s.window="periodic"))
+```
+the remainder is huge for both tseries, so let's try other datapoints (monthly average)
+
+```{r, echo=FALSE, fig.width=10, fig.height=8}
+
+data <- data %>%
+  group_by(Year = year(Date), Month = month(Date)) %>%
+  summarize(Avg_Temperature = mean(Value, na.rm = TRUE), .groups = 'drop') %>%
+  mutate(Date = as.Date(paste(Year, Month, "1", sep = "-"))) %>%
+  select(Date, Avg_Temperature)
+
+names(data)[1] <- "Date"
+names(data)[2] <- "Value"
+
+data$Value <- as.numeric(data$Value)
+data$Date <- as.Date(data$Date, format="%Y-%m")
+
+data
+
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.height=5.5, fig.width=10}
+tSeries <- ts(data = data$Value, start = as.numeric(c(format(data$Date[1], "%Y"), format(data$Date[1], "%m"))), freq = 12)
+xname <- "Average monthly temp in Australia"
+plot(tSeries, type="l", ylab=xname, col="red")
+grid()
+
+D <- 36
+trainSeries <- window(tSeries, end  =c(year(data$Date[length(data$Date)-D]),  month(data$Date[length(data$Date)-D])))
+testSeries  <- window(tSeries, start=c(year(data$Date[length(data$Date)-D+1]),month(data$Date[length(data$Date)-D+1])))
+```
+
+
+STL decomposition:
+
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+plot(stl(tSeries, s.window="periodic"))
+```
+
+
+
+
+
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+LambdaOpt <- BoxCox.lambda(tSeries)
+plot(stl(BoxCox(tSeries, LambdaOpt), s.window="periodic"))
+```
+```{r, echo=FALSE, fig.width=10, fig.height=8}
+par(mfrow=c(2,1))
+plot(tSeries, ylab="Original series", xlab="", col="red")
+grid()
+
+plot(BoxCox(tSeries, LambdaOpt), ylab="Transformed series", xlab="", col="red")
+title(main=toString(round(LambdaOpt, 3)))
+grid()
+```
+they are almost identical, but i'd prefer to use transformation
+
+
+```{r, echo=FALSE}
+fit.auto <- auto.arima(tSeries, lambda=LambdaOpt, biasadj=T)
+fit.auto
+```
+ARIMA(2,0,0)(0,1,1)[12]
+
+
+```{r, echo=FALSE, fig.height=4.5, fig.width=10}
+res.auto <- residuals(fit.auto)
+plot(res.auto)
+```
+
+first results don't look good, so i'd cut the first year (12)
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+res.auto <- res.auto[-c(1:12)]
+tsdisplay(res.auto)
+```
+
+
+```{r, echo=FALSE}
+p <- rep(0, 1, frequency(tSeries)*3)
+for (i in 1:length(p)){
+  p[i] <- Box.test(res.auto, lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="p-values", ylim=c(0,1), main="Ljung-Box test")
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+par(mfrow=c(1,2))
+qqnorm(res.auto)
+qqline(res.auto, col="red")
+hist(res.auto)
+```
+
+```{r}
+shapiro.test(res.auto)$p.value
+wilcox.test(res.auto)$p.value
+kpss.test(res.auto)$p.value
+
+```
+All hypothesis are not rejected except stationarity, but it is close to 0.05 
+
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+plot(diff(BoxCox(tSeries, LambdaOpt), 12), type="l", col="red")
+grid()
+```
+
+
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=12}
+par(mfrow=c(1,2))
+acf(diff(diff(BoxCox(tSeries, LambdaOpt), 12), 1), lag.max=5*12, main="")
+pacf(diff(diff(BoxCox(tSeries, LambdaOpt), 12), 1), lag.max=5*12, main="")
+```
+
+
+ACF: Since 54 is maximal significant seasonal lag, we could use $Q = 54/12 = 4.5$ as an initial approximation.
+Maximal significant lag before 12 is 11, hence the starting value $q=11$.
+
+PACF: 24 is maximal significant seasonal lag, we select initial values $P=2$, $p=11$.
+
+Next we'll look for the best models with auto.arima using d=1, D=1, max.p=10, max.q=10, max.P=4, max.Q=4 (where possible, we added 1 to every initial approximation found above just in case), and the parameters of the automatic model as starting points of the search (start.p=2, start.q=1, start.P=2, start.Q=1). 
+
+
+```{r echo=F}
+fit <- auto.arima(tSeries, d=1, D=1, max.p=12, max.q=12, max.P = 5, max.Q = 5, 
+                  start.p=11, start.q=11, start.P=2, start.Q=4, 
+                  lambda=LambdaOpt, biasadj=T)
+fit
+```
+
+```{r, echo=FALSE, fig.height=4.5, fig.width=10}
+res <- residuals(fit)
+plot(res)
+```
+cut the first 12:
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+res <- res[-c(1:12)]
+tsdisplay(res)
+```
+
+Ljung-Box test p-values for the residuals:
+```{r, echo=FALSE}
+p <- rep(0, 1, frequency(tSeries)*3)
+for (i in 1:length(p)){
+  p[i] <- Box.test(res, lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="p-values", ylim=c(0,1), main="Ljung-Box test")
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+Q-Q plot and histogram of the residuals:
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+par(mfrow=c(1,2))
+qqnorm(res)
+qqline(res, col="red")
+hist(res)
+```
+
+
+```{r}
+shapiro.test(res)$p.value
+wilcox.test(res)$p.value
+kpss.test(res)$p.value
+
+```
+```{r, echo=FALSE, fig.height=8, fig.width=8}
+res_manual_orig_scale <- residuals(fit, type = "response")[-c(1:12)]
+res_auto_orig_scale <- residuals(fit.auto, type = "response")[-c(1:12)]
+ax_range <- range(c(res_manual_orig_scale, res_auto_orig_scale))
+
+plot(res_manual_orig_scale, res_auto_orig_scale, xlim=ax_range, ylim=ax_range, 
+     xlab = "Residuals of manually found model", ylab="Residuals of auto.arima model")
+grid()
+lines(c(ax_range[1], ax_range[2])*2, c(ax_range[1], ax_range[2])*2, col="red")
+```
+seems like auto model is quite better than manual one (based on AIC), so i'll use auto arima. not using bootstrap, because it's not rejected that it's normal
+
+```{r, echo=FALSE}
+fl <- forecast(fit.auto, h=D)
+print(fl)
+```
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+plot(fl, ylab=xname, xlab="Year", col="red")
+```
+
+
+
+```{r, echo=FALSE}
+fit.ets <- ets(tSeries, lambda=LambdaOpt, biasadj = T)
+print(fit.ets)
+```
+Residuals:
+```{r, echo=FALSE, fig.height=8, fig.width=10}
+tsdisplay(residuals(fit.ets))
+```
+
+
+Ljung-Box test p-values for them:
+
+```{r, echo=FALSE}
+p <- rep(0, 1, frequency(tSeries)*3)
+for (i in 1:length(p)){
+  p[i] <- Box.test(residuals(fit.ets), lag=i, type = "Ljung-Box")$p.value
+}
+plot(p, xlab="Lag", ylab="p-values", ylim=c(0,1), main="Ljung-Box test")
+abline(h = 0.05, lty = 2, col = "blue")
+```
+
+The residuals are not correlated
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+par(mfrow=c(1,2))
+qqnorm(residuals(fit.ets))
+qqline(residuals(fit.ets), col="red")
+hist(residuals(fit.ets))
+```
+
+
+
+```{r}
+shapiro.test(residuals(fit.ets))$p.value
+wilcox.test(residuals(fit.ets))$p.value
+kpss.test(residuals(fit.ets))$p.value
+
+```
+
+Fitting the selected model to the first $T-D$ points of the series to check the accuracy of the forecast on the last $D$ points:
+```{r, echo=FALSE}
+fitShort <- ets(trainSeries, model="ANA", damped=F, lambda=LambdaOpt, biasadj = T)
+fc       <- forecast(fitShort, h=D)
+accuracy(fc, testSeries)
+```
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+plot(forecast(fitShort, h=D), ylab=xname, xlab="Year")
+lines(tSeries, col="red")
+```
+now the same with auto arima
+```{r, echo=FALSE}
+fitShort <- Arima(trainSeries, order=c(2,0,0), seasonal=c(0,1,1), lambda=LambdaOpt, biasadj = T)
+fc       <- forecast(fitShort, h=D)
+accuracy(fc, testSeries)
+```
+
+and manual arima 
+
+```{r, echo=FALSE, fig.height=5.5, fig.width=10}
+fitShort <- Arima(trainSeries, order=c(0,1,1), seasonal=c(0,1,1), lambda=LambdaOpt, biasadj = T)
+fc       <- forecast(fitShort, h=D)
+accuracy(fc, testSeries)
+```
+
+```{r, echo=F}
+dm.test(res, res.auto)
+```
+
+Diebold-Mariano test does not find the differences between forecasting errors of two ARIMAs significant. 
+The residuals of two models have the same properties. 
+Auto model has a little smaller AICc, so we'll use the auto tuned ARIMA.
+
+Comparing the residuals of the best ARIMA and the best ETS models:
+```{r fig.width=8, fig.height=8, echo=FALSE}
+res.ets <- residuals(fit.ets, type = "response")[-c(1:12)]
+
+plot(res.auto, res.ets, 
+     xlab="Residuals, best ARIMA",
+     ylab="Residuals, best ETS",
+     xlim=c(min(c(res.auto, res.ets), na.rm=T), max(c(res.auto, res.ets), na.rm=T)),
+     ylim=c(min(c(res.auto, res.ets), na.rm=T), max(c(res.auto, res.ets), na.rm=T)))
+ lines(c(min(c(res.auto, res.ets), na.rm=T), max(c(res.auto, res.ets), na.rm=T)), c(min(c(res.auto, res.ets), na.rm=T), max(c(res.auto, res.ets), na.rm=T)), col="red")
+```
+
+```{r, echo=F}
+dm.test(res.auto, res.ets)
+
+```
+
+p-value > 0.05, so they are not significantly different. the forecasts for auto arima and ets are above
+

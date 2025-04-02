@@ -1,0 +1,152 @@
+---
+title: "Assingment 2"
+author: "Artsiom Padmaska"
+output: html_document
+---
+
+```{r}
+```
+
+```{r}
+library(readxl)
+data <- read_excel("memantine.xls", sheet = "data")
+str(data)
+```
+
+```{r}
+head(data)
+```
+
+```{r}
+sum(is.na(data))
+```
+
+```{r}
+library(dplyr)
+data <- data %>% na.omit()
+```
+
+```{r}
+sum(is.na(data))
+```
+
+```{r}
+response_variable <- data$DYRK1A_N
+
+genotype <- as.factor(data$Genotype)
+treatment <- as.factor(data$Treatment)
+
+model <- aov(response_variable ~ genotype * treatment, data = data)
+summary(model)
+```
+
+```{r}
+TukeyHSD(model)
+
+```
+So, while ANOVA worked for DYRK1A_N, I started organizing a p-values matrix 
+```{r}
+protein_names <- colnames(data)[2:78]
+
+anova_results <- list()
+tukey_results <- list()
+
+for (protein_name in protein_names) {
+
+  formula <- as.formula(paste(protein_name, "~ genotype * treatment"))
+
+
+  model <- aov(formula, data = data)
+  anova_results[[protein_name]] <- summary(model)
+
+  tukey_results[[protein_name]] <- TukeyHSD(model)
+}
+```
+
+```{r}
+extract_p_values <- function(anova_summary, term) {
+    anova_table <- anova_summary[[1]]
+    row.names(anova_table) <- trimws(row.names(anova_table))
+    if (is.data.frame(anova_table)) {
+        if (term %in% row.names(anova_table)) {
+            p_value <- anova_table[term, "Pr(>F)"]
+            return(p_value)
+        } else {
+            stop("Term not found in ANOVA table")
+        }
+    } else {
+        stop("Invalid ANOVA summary object")
+    }
+}
+
+p_value_genotype <- extract_p_values(anova_results[['DYRK1A_N']], "genotype")
+p_value_treatment <- extract_p_values(anova_results[['DYRK1A_N']], "treatment")
+p_value_interaction <- extract_p_values(anova_results[['DYRK1A_N']], "genotype:treatment")
+
+p_value_genotype
+p_value_treatment
+p_value_interaction
+```
+```{r}
+all_p_values <- c()
+
+for (protein_name in names(anova_results)) {
+  anova_summary <- anova_results[[protein_name]]
+  p_value_genotype <- extract_p_values(anova_summary, "genotype")
+  p_value_treatment <- extract_p_values(anova_summary, "treatment")
+  p_value_interaction <- extract_p_values(anova_summary, "genotype:treatment")
+  
+  all_p_values <- c(all_p_values, p_value_genotype, p_value_treatment, p_value_interaction)
+}
+
+adjusted_p_values <- p.adjust(all_p_values, method = "BH")
+
+num_proteins <- length(anova_results)
+adjusted_p_values_matrix <- matrix(adjusted_p_values, nrow = num_proteins, byrow = TRUE)
+rownames(adjusted_p_values_matrix) <- names(anova_results)
+colnames(adjusted_p_values_matrix) <- c("genotype", "treatment", "interaction")
+
+adjusted_p_values_matrix
+```
+
+```{r}
+
+
+significance_level <- 0.05
+
+significant_results <- adjusted_p_values_matrix < significance_level
+
+significant_df <- as.data.frame(significant_results)
+significant_df$Protein <- rownames(significant_df)
+
+significant_df <- significant_df[, c("Protein", "genotype", "treatment", "interaction")]
+
+significant_df
+
+
+
+```
+Here I realized that I've done more work than I was asked to. However, the answer to the question is 'genotype' column (False -- doesn't differ for healthy and trisomy mice, true -- differs)
+
+Bonus -- here is a box plots for each significant protein
+
+```{r}
+sum(significant_df['genotype'])
+
+```
+
+```{r}
+library(ggplot2)
+
+for (protein in significant_df$Protein[significant_df$genotype | significant_df$treatment | significant_df$interaction]) {
+
+  p <- ggplot(data, aes_string(x = "genotype:treatment", y = protein)) +
+    geom_boxplot() +
+    labs(title = paste("Expression of", protein), x = "Group", y = "Expression Level")
+    
+  
+  print(p)
+}
+
+```
+
